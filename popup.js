@@ -127,106 +127,160 @@ saveBtn.addEventListener('click', async () => {
 
 // ═══════════════════════════════════════════════════════════════════
 //  HTML SERIALIZER WITH INLINE COMPUTED STYLES
-//  Outputs clean indented HTML like:
-//    <div style="display:flex;padding:10.5px;background-color:rgb(...);">
-//        <span style="font-weight:600;">Land:</span>
-//        <span style="...">Austria</span>
-//    </div>
+//  Matches the "right" output format exactly:
+//  - Only meaningful, non-default CSS values
+//  - SVG elements stripped completely
+//  - margin:auto preserved (critical for client vs fake identification)
+//  - No &quot; escaping inside style values — use single quotes
+//  - Clean indented HTML with proper closing tags
 // ═══════════════════════════════════════════════════════════════════
 
 // Injected into the page via executeScript.
 // args[0] = CSS selector string, or null for full body.
 function serializeAccessibilityTree(rootSelector) {
 
-  // Tags we never want in the output
+  // Tags we never output — includes ALL SVG elements
   const SKIP_TAGS = new Set([
-    'script','style','noscript','meta','link','head',
-    'template','slot',
+    'script','style','noscript','meta','link','head','template','slot',
+    'svg','path','circle','rect','line','polyline','polygon','ellipse',
+    'g','defs','use','symbol','clippath','lineargradient','radialgradient',
+    'stop','pattern','marker','text','tspan','textpath','filter',
+    'fegaussianblur','fecolormatrix','feblend','fecomposite',
   ]);
 
-  // Void elements — no closing tag
+  // Void elements — self-closing, no children
   const VOID_TAGS = new Set([
     'area','base','br','col','embed','hr','img','input',
-    'link','meta','param','source','track','wbr',
+    'param','source','track','wbr',
   ]);
 
-  // CSS properties to include in the inline style
-  // Only properties that carry real visual/layout meaning
+  // ONLY these CSS properties make it into the output.
+  // This exact list matches the "right" rip-page extension output.
   const STYLE_PROPS = [
-    'display','overflow','overflow-x','overflow-y',
-    'flex-direction','flex-wrap','flex','flex-grow','flex-shrink','flex-basis',
-    'justify-content','align-items','align-self','align-content','gap',
-    'grid-template-columns','grid-template-rows','grid-column','grid-row',
-    'position','top','right','bottom','left','z-index','float',
+    'display',
+    'overflow','overflow-x','overflow-y',
+    'flex-direction','flex-wrap','flex','flex-grow','flex-shrink',
+    'justify-content','align-items','align-self','gap',
+    'position','top','right','bottom','left','z-index',
     'width','height','min-width','max-width','min-height','max-height',
     'padding','padding-top','padding-right','padding-bottom','padding-left',
     'margin','margin-top','margin-right','margin-bottom','margin-left',
     'border','border-top','border-right','border-bottom','border-left',
     'border-radius','border-collapse','border-color','border-width',
     'background-color','background-image','background-size','background-position',
-    'background-repeat','backdrop-filter',
+    'backdrop-filter',
     'color','font-family','font-size','font-weight','font-style',
     'line-height','letter-spacing','text-align','text-decoration','text-transform',
     'white-space','word-break','overflow-wrap','vertical-align',
-    'cursor','opacity','visibility','pointer-events',
-    'box-sizing','box-shadow','text-shadow',
-    'user-select','resize','list-style',
-    'border-spacing','table-layout',
-    'transform','transition-property','transition-duration','transition-timing-function',
-    'aspect-ratio','object-fit','object-position',
+    'cursor','opacity','resize',
+    'box-sizing','box-shadow',
+    'user-select','list-style',
+    'transform',
+    'transition-property','transition-timing-function','transition-duration',
+    'aspect-ratio',
   ];
 
-  // Computed values that add no information — skip them
-  const SKIP_VALUES = new Set([
-    '','auto','normal','none','initial','unset','inherit','revert',
-    'static','inline','0px','0%','0','rgba(0, 0, 0, 0)','transparent',
-    'visible','start','left','top','separate','disc','outside',
-    'repeat','scroll','padding-box','border-box',
-    'ease','all','0s',
+  // Default / noise values to skip — BUT NOT 'auto' for margins
+  // because margin-left:auto / margin-right:auto tells us client vs fake
+  const ALWAYS_SKIP = new Set([
+    '','initial','unset','inherit','revert',
+    'rgba(0, 0, 0, 0)',
+    'ease','all','0s','normal','none',
+    'repeat','scroll','padding-box',
+    'outside none disc','outside none none',
   ]);
 
+  // Per-property skip rules — values that are the boring default for that prop
+  const PROP_DEFAULTS = {
+    'display': 'inline',
+    'position': 'static',
+    'overflow': 'visible', 'overflow-x': 'visible', 'overflow-y': 'visible',
+    'flex-direction': 'row', 'flex-wrap': 'nowrap',
+    'flex-grow': '0', 'flex-shrink': '1',
+    'top': '0px', 'right': '0px', 'bottom': '0px', 'left': '0px',
+    'z-index': 'auto',
+    'opacity': '1',
+    'border-collapse': 'separate',
+    'vertical-align': 'baseline',
+    'text-align': 'start',
+    'text-decoration': 'none solid rgb(0, 0, 0)',
+    'text-transform': 'none',
+    'white-space': 'normal',
+    'word-break': 'normal',
+    'overflow-wrap': 'normal',
+    'cursor': 'auto',
+    'resize': 'none',
+    'box-shadow': 'none',
+    'backdrop-filter': 'none',
+    'transform': 'none',
+    'letter-spacing': 'normal',
+    'aspect-ratio': 'auto',
+    'list-style': 'outside none disc',
+    'background-image': 'none',
+    'background-size': 'auto',
+    'background-position': '0% 0%',
+    'user-select': 'auto',
+    'object-fit': 'fill',
+    'object-position': '50% 50%',
+  };
+
   function buildStyleAttr(el) {
-    const computed  = window.getComputedStyle(el);
-    const original  = el.getAttribute('style') || '';
+    const computed = window.getComputedStyle(el);
+    const original = el.getAttribute('style') || '';
 
-    // Collect computed values for our chosen props
+    // Start with original inline styles — they have the author's intent
+    // including CSS variables, shorthands, and exact values
     const map = new Map();
-    STYLE_PROPS.forEach(prop => {
-      const val = computed.getPropertyValue(prop).trim();
-      if (val && !SKIP_VALUES.has(val)) map.set(prop, val);
-    });
-
-    // Overlay original inline styles (they may have values computed misses,
-    // like CSS variables, shorthand with spaces, etc.)
     if (original) {
       original.split(';').forEach(decl => {
         const colon = decl.indexOf(':');
         if (colon === -1) return;
         const key = decl.slice(0, colon).trim();
         const val = decl.slice(colon + 1).trim();
-        if (key && val) map.set(key, val);  // original wins
+        if (key && val) map.set(key, val);
       });
     }
 
+    // Add computed values for props NOT already in original
+    STYLE_PROPS.forEach(prop => {
+      if (map.has(prop)) return; // original already has it
+      const val = computed.getPropertyValue(prop).trim();
+      if (!val) return;
+      if (ALWAYS_SKIP.has(val)) return;
+      if (PROP_DEFAULTS[prop] === val) return;
+      // Skip 0px for padding/margin/border unless it's meaningful
+      if (val === '0px' && (prop.startsWith('padding') || prop.startsWith('margin') || prop === 'border-width')) return;
+      // Skip transparent background-color
+      if (prop === 'background-color' && val === 'rgba(0, 0, 0, 0)') return;
+      if (prop === 'background-color' && val === 'transparent') return;
+      map.set(prop, val);
+    });
+
     if (!map.size) return '';
-    return Array.from(map.entries()).map(([k, v]) => `${k}:${v}`).join(';');
+
+    // Build style string — use single quotes inside values to avoid &quot; pollution
+    return Array.from(map.entries())
+      .map(([k, v]) => `${k}:${v}`)
+      .join(';');
   }
 
-  function escapeAttr(str) {
-    return str.replace(/&/g,'&amp;').replace(/"/g,'&quot;');
-  }
-
-  function escapeText(str) {
+  function escText(str) {
     return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  // For style attribute values — only escape & and use single quotes for inner strings
+  // This avoids the &quot; ugliness while keeping valid HTML
+  function escStyleVal(str) {
+    // Replace double-quote wrapping of font-family names with single quotes
+    return str.replace(/"/g, "'");
   }
 
   function serialize(node, depth) {
     const indent = '    '.repeat(depth);
 
-    // Text node
     if (node.nodeType === 3) {
       const t = node.textContent.replace(/\s+/g, ' ').trim();
-      return t ? indent + escapeText(t) + '\n' : '';
+      return t ? indent + escText(t) + '\n' : '';
     }
 
     if (node.nodeType !== 1) return '';
@@ -234,45 +288,47 @@ function serializeAccessibilityTree(rootSelector) {
     const tag = node.tagName.toLowerCase();
     if (SKIP_TAGS.has(tag)) return '';
 
-    // Build attribute string
+    // Build attributes
     const attrParts = [];
 
-    // style — computed + original merged
     const styleStr = buildStyleAttr(node);
-    if (styleStr) attrParts.push(`style="${escapeAttr(styleStr)}"`);
+    if (styleStr) {
+      attrParts.push(`style="${escStyleVal(styleStr)}"`);
+    }
 
-    // All other meaningful HTML attributes
     const HTML_ATTRS = [
-      'id','class','href','src','srcset','alt','placeholder',
-      'rows','cols','type','value','name','for','action','method',
+      'src','srcset','alt','href',
+      'placeholder','rows','cols','type','value','name',
       'width','height','loading','decoding','data-nimg',
-      'role','aria-label','aria-hidden','tabindex',
-      'target','rel','data-id','data-type',
+      'id','class','role','aria-label','aria-hidden',
+      'target','rel','for',
     ];
     HTML_ATTRS.forEach(a => {
       const v = node.getAttribute(a);
-      if (v !== null && v.trim() !== '') attrParts.push(`${a}="${escapeAttr(v.trim())}"`);
+      if (v !== null && v.trim() !== '') {
+        attrParts.push(`${a}="${v.trim().replace(/"/g, '&quot;')}"`);
+      }
     });
 
     const attrsStr = attrParts.length ? ' ' + attrParts.join(' ') : '';
 
-    // Void elements — self-closing
     if (VOID_TAGS.has(tag)) {
       return `${indent}<${tag}${attrsStr} />\n`;
     }
 
-    // Check if only text children (write inline for compact output)
     const childNodes = Array.from(node.childNodes);
-    const textOnly = childNodes.every(
-      c => c.nodeType === 3 || (c.nodeType === 1 && SKIP_TAGS.has(c.tagName.toLowerCase()))
+
+    // Filter out skip-tag children for textOnly check
+    const visibleChildren = childNodes.filter(c =>
+      !(c.nodeType === 1 && SKIP_TAGS.has(c.tagName.toLowerCase()))
     );
+    const textOnly = visibleChildren.every(c => c.nodeType === 3);
     const textContent = node.textContent.replace(/\s+/g, ' ').trim();
 
     if (textOnly && textContent) {
-      return `${indent}<${tag}${attrsStr}>${escapeText(textContent)}</${tag}>\n`;
+      return `${indent}<${tag}${attrsStr}>${escText(textContent)}</${tag}>\n`;
     }
 
-    // Element with children — open tag, recurse, close tag
     let out = `${indent}<${tag}${attrsStr}>\n`;
     for (const child of childNodes) {
       out += serialize(child, depth + 1);
@@ -287,7 +343,6 @@ function serializeAccessibilityTree(rootSelector) {
 
   if (!root) return null;
 
-  // For full page, wrap in proper html/head/body structure
   if (!rootSelector) {
     return `<html>\n\n<head></head>\n\n` + serialize(root, 0) + `\n</html>`;
   }
