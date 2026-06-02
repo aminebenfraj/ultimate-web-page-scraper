@@ -6,6 +6,7 @@
 const grabBtn       = document.getElementById('grabBtn');
 const xpathBtn      = document.getElementById('xpathBtn');
 const saveBtn       = document.getElementById('saveBtn');
+const resetBtn      = document.getElementById('resetBtn');
 const status        = document.getElementById('status');
 const pageUrlEl     = document.getElementById('pageUrl');
 const lastSizeEl    = document.getElementById('lastSize');
@@ -125,12 +126,169 @@ saveBtn.addEventListener('click', async () => {
   flashBtn(saveBtn, '✓ Saved!');
 });
 
+// ── RESET BUTTON ──────────────────────────────────────────────────
+resetBtn.addEventListener('click', async () => {
+  // 1. Kill any active picker on the page
+  if (pickingActive) {
+    pickingActive = false;
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: currentTab.id },
+        func: () => {
+          sessionStorage.removeItem('__htmlgrabber_picked__');
+          sessionStorage.removeItem('__htmlgrabber_cancelled__');
+          const overlay = document.getElementById('__htmlgrabber_overlay__');
+          if (overlay) overlay.remove();
+          // remove highlight div too
+          document.querySelectorAll('[style*="2147483646"]').forEach(el => el.remove());
+        },
+      });
+    } catch(_) {}
+  }
+
+  // 2. Reset all UI state
+  currentMode     = 'full';
+  lastGrabbedHTML  = null;
+  lastGrabbedXPath = null;
+
+  pills.forEach(p => p.classList.remove('active'));
+  document.querySelector('[data-mode="full"]').classList.add('active');
+  selectorRow.style.display   = 'none';
+  selectorInput.value         = '';
+  detectBanner.style.display  = 'none';
+
+  grabBtn.className   = 'grab-btn';
+  grabBtn.textContent = '⚡ Copy HTML';
+
+  setStatus('');
+  lastSizeEl.textContent = '—';
+
+  // 3. Flash feedback
+  resetBtn.style.color       = '#00ff88';
+  resetBtn.style.borderColor = '#00ff88';
+  resetBtn.textContent       = '✓ Reset';
+  setTimeout(() => {
+    resetBtn.style.color       = '#ff4444';
+    resetBtn.style.borderColor = '#330000';
+    resetBtn.textContent       = '↺ Reset';
+  }, 1500);
+});
+
+// ═══════════════════════════════════════════════════════════════════
+//  CHAT ANNOTATOR — runs BEFORE serialization
+//  Reads the DOM class names and data to inject clear semantic
+//  data-* attributes onto every chat message bubble:
+//    data-sender="fake|client"
+//    data-gender="female|male"
+//    data-persona="Silke" (fake account name)
+//    data-is-last="true" (on the last/most recent message)
+//    data-moderator="TT_WA024" (moderator ID if visible)
+//    data-timestamp="06:57 (5 hours ago)"
+//  This way the extractor never has to guess from CSS.
+// ═══════════════════════════════════════════════════════════════════
+function annotateChatMessages() {
+  // ── Detect persona name from fake sidebar ──
+  let personaName = '';
+  let personaGender = '';
+
+  // Right sidebar has id="fake-sidebar" or bg-gradient from-female/from-male
+  const fakeSidebar = document.getElementById('fake-sidebar')
+    || document.querySelector('[class*="fake-sidebar"]')
+    || (() => {
+      // fallback: find aside with female gradient (pink)
+      return Array.from(document.querySelectorAll('aside')).find(a =>
+        a.className && (a.className.includes('from-female') || a.className.includes('right-0'))
+      );
+    })();
+
+  if (fakeSidebar) {
+    // Gender from gradient class
+    if (fakeSidebar.innerHTML.includes('from-female')) personaGender = 'female';
+    else if (fakeSidebar.innerHTML.includes('from-male')) personaGender = 'male';
+
+    // Name from the <p class="text-lg"> inside the sidebar header
+    const nameEl = fakeSidebar.querySelector('p.text-lg, [class*="text-lg"]');
+    if (nameEl) personaName = nameEl.textContent.replace(/[,\s]+$/, '').trim();
+  }
+
+  // ── Detect client name from left sidebar ──
+  let clientName = '';
+  let clientGender = '';
+  const clientSidebar = document.getElementById('regular-sidebar')
+    || (() => {
+      return Array.from(document.querySelectorAll('aside')).find(a =>
+        a.className && (a.className.includes('regular-sidebar') || a.className.includes('left-0') || a.className.includes('translate-x-[-336px]'))
+      );
+    })();
+
+  if (clientSidebar) {
+    if (clientSidebar.innerHTML.includes('from-female')) clientGender = 'female';
+    else if (clientSidebar.innerHTML.includes('from-male')) clientGender = 'male';
+    const nameEl = clientSidebar.querySelector('p.text-lg, [class*="text-lg"]');
+    if (nameEl) clientName = nameEl.textContent.replace(/[,\s]+$/, '').trim();
+  }
+
+  // ── Find all chat message bubbles ──
+  // Bubbles have class "from-female" or "from-male" AND either "ml-auto" (fake/right) or "mr-auto" (client/left)
+  const allBubbles = Array.from(document.querySelectorAll('[class*="from-female"],[class*="from-male"]'))
+    .filter(el => {
+      const cls = el.className || '';
+      return (cls.includes('from-female') || cls.includes('from-male'))
+          && (cls.includes('ml-auto') || cls.includes('mr-auto') || cls.includes('rounded-tl') || cls.includes('rounded-tr'));
+    });
+
+  // ── Annotate each bubble ──
+  allBubbles.forEach((bubble, index) => {
+    const cls = bubble.className || '';
+
+    // Sender: ml-auto = pushed right = fake; mr-auto = pushed left = client
+    // Also: rounded-tl (top-left rounded) = fake (right side); rounded-tr = client (left side)
+    const isFake = cls.includes('ml-auto') || cls.includes('rounded-tl') || cls.includes('from-female ml') ;
+    const isClient = cls.includes('mr-auto') || cls.includes('rounded-tr');
+
+    // Gender from gradient
+    const gender = cls.includes('from-female') ? 'female'
+                 : cls.includes('from-male')   ? 'male'
+                 : '';
+
+    bubble.setAttribute('data-sender', isFake ? 'fake' : isClient ? 'client' : 'unknown');
+    bubble.setAttribute('data-gender', gender);
+
+    if (isFake && personaName) bubble.setAttribute('data-persona', personaName);
+    if (isClient && clientName) bubble.setAttribute('data-client', clientName);
+
+    // Timestamp — look for <small> inside the bubble
+    const small = bubble.querySelector('small');
+    if (small) bubble.setAttribute('data-timestamp', small.textContent.trim());
+
+    // Moderator name — the <div class="ml-auto text-right"> AFTER the bubble (persona label)
+    const next = bubble.nextElementSibling;
+    if (next && next.className && next.className.includes('ml-auto') && next.className.includes('text-right')) {
+      bubble.setAttribute('data-moderator', next.textContent.trim());
+    }
+  });
+
+  // ── Mark last message (first in DOM since column-reverse) ──
+  if (allBubbles.length > 0) {
+    // Column-reverse means first in DOM = newest = last sent
+    allBubbles[0].setAttribute('data-is-last', 'true');
+  }
+
+  return {
+    personaName,
+    personaGender,
+    clientName,
+    clientGender,
+    totalMessages: allBubbles.length,
+  };
+}
+
 // ═══════════════════════════════════════════════════════════════════
 //  HTML SERIALIZER WITH INLINE COMPUTED STYLES
 //  Matches the "right" output format exactly:
 //  - Only meaningful, non-default CSS values
 //  - SVG elements stripped completely
-//  - margin:auto preserved (critical for client vs fake identification)
+//  - data-sender/data-gender/data-persona attributes injected
 //  - No &quot; escaping inside style values — use single quotes
 //  - Clean indented HTML with proper closing tags
 // ═══════════════════════════════════════════════════════════════════
@@ -300,8 +458,10 @@ function serializeAccessibilityTree(rootSelector) {
       'src','srcset','alt','href',
       'placeholder','rows','cols','type','value','name',
       'width','height','loading','decoding','data-nimg',
-      'id','class','role','aria-label','aria-hidden',
-      'target','rel','for',
+      // semantic chat annotations injected by annotateChatMessages()
+      'data-sender','data-gender','data-persona','data-client',
+      'data-is-last','data-moderator','data-timestamp',
+      'id','role','aria-label',
     ];
     HTML_ATTRS.forEach(a => {
       const v = node.getAttribute(a);
@@ -342,6 +502,10 @@ function serializeAccessibilityTree(rootSelector) {
     : document.body;
 
   if (!root) return null;
+
+  // Run chat annotator — injects data-sender, data-gender, data-persona etc.
+  // onto every message bubble BEFORE we serialize, so they appear in the output
+  try { annotateChatMessages(); } catch(_) {}
 
   if (!rootSelector) {
     return `<html>\n\n<head></head>\n\n` + serialize(root, 0) + `\n</html>`;
@@ -456,10 +620,9 @@ function cancelPick() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-//  FINISH GRAB — copy, save history, update UI
+//  FINISH GRAB — copy via page context (no size limit)
 // ═══════════════════════════════════════════════════════════════════
 async function finishGrab(html, mode, xpath) {
-  await navigator.clipboard.writeText(html);
   lastGrabbedHTML  = html;
   lastGrabbedXPath = xpath || null;
 
@@ -470,9 +633,28 @@ async function finishGrab(html, mode, xpath) {
     await addToHistory({ html, mode, xpath, url: currentTab?.url || '', sizeKB, ts: Date.now() });
   }
 
-  grabBtn.className = 'grab-btn success';
-  grabBtn.textContent = '✓ Copied!';
-  setStatus(`${sizeKB} KB copied — mode: ${mode}`, 'ok');
+  // Inject the copy INTO the page — the page clipboard context has no quota limit
+  // unlike the extension popup context which is capped at ~500KB
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: currentTab.id },
+      func: (text) => {
+        return navigator.clipboard.writeText(text);
+      },
+      args: [html],
+    });
+
+    grabBtn.className = 'grab-btn success';
+    grabBtn.textContent = '✓ Copied!';
+    setStatus(`${sizeKB} KB copied to clipboard`, 'ok');
+
+  } catch (err) {
+    // Final fallback — download as file
+    downloadHTML(html, currentTab?.url || 'page');
+    grabBtn.className = 'grab-btn success';
+    grabBtn.textContent = '✓ Saved!';
+    setStatus(`Saved as file (clipboard unavailable)`, 'ok');
+  }
 
   setTimeout(() => {
     grabBtn.className = 'grab-btn';
