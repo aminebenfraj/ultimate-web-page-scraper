@@ -620,7 +620,7 @@ function cancelPick() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-//  FINISH GRAB — copy via page context (no size limit)
+//  FINISH GRAB — copy using textarea execCommand (works without focus)
 // ═══════════════════════════════════════════════════════════════════
 async function finishGrab(html, mode, xpath) {
   lastGrabbedHTML  = html;
@@ -633,27 +633,73 @@ async function finishGrab(html, mode, xpath) {
     await addToHistory({ html, mode, xpath, url: currentTab?.url || '', sizeKB, ts: Date.now() });
   }
 
-  // Inject the copy INTO the page — the page clipboard context has no quota limit
-  // unlike the extension popup context which is capped at ~500KB
+  // Strategy: store HTML in sessionStorage from the popup,
+  // then inject a script into the page that reads it and copies
+  // using a hidden textarea + execCommand — works even without page focus
+  let copied = false;
   try {
-    await chrome.scripting.executeScript({
+    // Step 1: store the HTML in extension storage (avoids args size limit)
+    await chrome.storage.local.set({ __grabber_pending_copy__: html });
+
+    // Step 2: inject into page — reads from storage, copies via textarea trick
+    const results = await chrome.scripting.executeScript({
       target: { tabId: currentTab.id },
-      func: (text) => {
-        return navigator.clipboard.writeText(text);
+      func: () => {
+        return new Promise((resolve) => {
+          chrome.storage.local.get('__grabber_pending_copy__', (data) => {
+            const text = data.__grabber_pending_copy__;
+            if (!text) { resolve(false); return; }
+
+            // Method 1: modern clipboard API (works if page is focused)
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              navigator.clipboard.writeText(text)
+                .then(() => { chrome.storage.local.remove('__grabber_pending_copy__'); resolve(true); })
+                .catch(() => {
+                  // Method 2: textarea + execCommand (works without focus)
+                  const ta = document.createElement('textarea');
+                  ta.value = text;
+                  ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;';
+                  document.body.appendChild(ta);
+                  ta.focus();
+                  ta.select();
+                  const ok = document.execCommand('copy');
+                  document.body.removeChild(ta);
+                  chrome.storage.local.remove('__grabber_pending_copy__');
+                  resolve(ok);
+                });
+            } else {
+              // Method 2 directly
+              const ta = document.createElement('textarea');
+              ta.value = text;
+              ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;';
+              document.body.appendChild(ta);
+              ta.focus();
+              ta.select();
+              const ok = document.execCommand('copy');
+              document.body.removeChild(ta);
+              chrome.storage.local.remove('__grabber_pending_copy__');
+              resolve(ok);
+            }
+          });
+        });
       },
-      args: [html],
     });
 
+    copied = results[0]?.result === true;
+  } catch (err) {
+    copied = false;
+  }
+
+  if (copied) {
     grabBtn.className = 'grab-btn success';
     grabBtn.textContent = '✓ Copied!';
     setStatus(`${sizeKB} KB copied to clipboard`, 'ok');
-
-  } catch (err) {
+  } else {
     // Final fallback — download as file
     downloadHTML(html, currentTab?.url || 'page');
     grabBtn.className = 'grab-btn success';
     grabBtn.textContent = '✓ Saved!';
-    setStatus(`Saved as file (clipboard unavailable)`, 'ok');
+    setStatus(`${sizeKB} KB — saved as file (clipboard blocked)`, 'ok');
   }
 
   setTimeout(() => {
