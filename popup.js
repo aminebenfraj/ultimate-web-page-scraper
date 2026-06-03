@@ -42,6 +42,27 @@ async function init() {
   currentTab = tab;
   if (tab?.url) pageUrlEl.textContent = tab.url;
 
+  // Clean up any bloated history from old versions that stored full HTML
+  // This frees up storage quota that was causing kQuotaBytes errors
+  try {
+    const data = await chrome.storage.local.get('grab_history');
+    const history = data.grab_history || [];
+    const needsClean = history.some(item => item.html && item.html.length > 500);
+    if (needsClean) {
+      const cleaned = history.map(item => ({
+        mode:    item.mode,
+        url:     item.url,
+        sizeKB:  item.sizeKB,
+        xpath:   item.xpath || null,
+        ts:      item.ts,
+        preview: item.html ? item.html.slice(0, 300) : (item.preview || ''),
+      }));
+      await chrome.storage.local.set({ grab_history: cleaned });
+    }
+    // Also clear any stale pending copy that might be taking up space
+    await chrome.storage.local.remove('__grabber_pending_copy__');
+  } catch(_) {}
+
   renderHistory();
   renderDiffSelects();
 
@@ -621,6 +642,7 @@ function cancelPick() {
 
 // ═══════════════════════════════════════════════════════════════════
 //  FINISH GRAB — copy using textarea execCommand (works without focus)
+//  Auto-clears storage after every copy so quota never fills up
 // ═══════════════════════════════════════════════════════════════════
 async function finishGrab(html, mode, xpath) {
   lastGrabbedHTML  = html;
@@ -633,38 +655,40 @@ async function finishGrab(html, mode, xpath) {
     await addToHistory({ html, mode, xpath, url: currentTab?.url || '', sizeKB, ts: Date.now() });
   }
 
-  // Strategy: store HTML in sessionStorage from the popup,
-  // then inject a script into the page that reads it and copies
-  // using a hidden textarea + execCommand — works even without page focus
+  // Always clear stale storage first so we start with a clean slate
+  await chrome.storage.local.remove('__grabber_pending_copy__');
+
   let copied = false;
   try {
-    // Step 1: store the HTML in extension storage (avoids args size limit)
+    // Store HTML for the injected script to read
     await chrome.storage.local.set({ __grabber_pending_copy__: html });
 
-    // Step 2: inject into page — reads from storage, copies via textarea trick
+    // Inject into page — reads from storage, copies via textarea trick
     const results = await chrome.scripting.executeScript({
       target: { tabId: currentTab.id },
       func: () => {
         return new Promise((resolve) => {
           chrome.storage.local.get('__grabber_pending_copy__', (data) => {
             const text = data.__grabber_pending_copy__;
+
+            // Always clean up storage immediately after reading — no leftovers
+            chrome.storage.local.remove('__grabber_pending_copy__');
+
             if (!text) { resolve(false); return; }
 
-            // Method 1: modern clipboard API (works if page is focused)
+            // Method 1: modern clipboard API
             if (navigator.clipboard && navigator.clipboard.writeText) {
               navigator.clipboard.writeText(text)
-                .then(() => { chrome.storage.local.remove('__grabber_pending_copy__'); resolve(true); })
+                .then(() => resolve(true))
                 .catch(() => {
                   // Method 2: textarea + execCommand (works without focus)
                   const ta = document.createElement('textarea');
                   ta.value = text;
                   ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;';
                   document.body.appendChild(ta);
-                  ta.focus();
-                  ta.select();
+                  ta.focus(); ta.select();
                   const ok = document.execCommand('copy');
                   document.body.removeChild(ta);
-                  chrome.storage.local.remove('__grabber_pending_copy__');
                   resolve(ok);
                 });
             } else {
@@ -673,11 +697,9 @@ async function finishGrab(html, mode, xpath) {
               ta.value = text;
               ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;';
               document.body.appendChild(ta);
-              ta.focus();
-              ta.select();
+              ta.focus(); ta.select();
               const ok = document.execCommand('copy');
               document.body.removeChild(ta);
-              chrome.storage.local.remove('__grabber_pending_copy__');
               resolve(ok);
             }
           });
@@ -689,6 +711,9 @@ async function finishGrab(html, mode, xpath) {
   } catch (err) {
     copied = false;
   }
+
+  // Always clean up after — whether it worked or not
+  await chrome.storage.local.remove('__grabber_pending_copy__');
 
   if (copied) {
     grabBtn.className = 'grab-btn success';
@@ -889,7 +914,16 @@ async function loadHistory() {
 
 async function addToHistory(item) {
   let history = await loadHistory();
-  history.unshift(item);
+  // Store metadata only — NOT the full HTML (can be MBs, blows storage quota fast)
+  history.unshift({
+    mode:   item.mode,
+    url:    item.url,
+    sizeKB: item.sizeKB,
+    xpath:  item.xpath || null,
+    ts:     item.ts,
+    // store a short preview snippet only (first 300 chars)
+    preview: item.html ? item.html.slice(0, 300) : '',
+  });
   if (history.length > 10) history = history.slice(0, 10);
   await chrome.storage.local.set({ grab_history: history });
 }
@@ -936,11 +970,20 @@ async function renderHistory() {
       const item = history[idx];
       const action = btn.dataset.action;
       if (action === 'copy') {
-        await navigator.clipboard.writeText(item.html);
-        btn.textContent = '✓ Copied'; setTimeout(() => btn.textContent = '📋 Copy', 1500);
+        // Only the most recent grab (idx=0) can be copied — it's still in memory
+        if (idx === 0 && lastGrabbedHTML) {
+          await navigator.clipboard.writeText(lastGrabbedHTML);
+          btn.textContent = '✓ Copied'; setTimeout(() => btn.textContent = '📋 Copy', 1500);
+        } else {
+          btn.textContent = '⚠ Re-grab needed'; setTimeout(() => btn.textContent = '📋 Copy', 2000);
+        }
       } else if (action === 'save') {
-        downloadHTML(item.html, item.url);
-        btn.textContent = '✓ Saved'; setTimeout(() => btn.textContent = '💾 Save', 1500);
+        if (idx === 0 && lastGrabbedHTML) {
+          downloadHTML(lastGrabbedHTML, item.url);
+          btn.textContent = '✓ Saved'; setTimeout(() => btn.textContent = '💾 Save', 1500);
+        } else {
+          btn.textContent = '⚠ Re-grab needed'; setTimeout(() => btn.textContent = '💾 Save', 2000);
+        }
       } else if (action === 'xpath') {
         await navigator.clipboard.writeText(item.xpath);
         btn.textContent = '✓ Copied'; setTimeout(() => btn.textContent = '📍 XPath', 1500);
