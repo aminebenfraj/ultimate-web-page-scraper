@@ -88,6 +88,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
     if (tab.dataset.tab === 'history') renderHistory();
     if (tab.dataset.tab === 'diff')    renderDiffSelects();
+    if (tab.dataset.tab === 'stats')   initStatsTab();
   });
 });
 
@@ -477,7 +478,7 @@ function serializeAccessibilityTree(rootSelector) {
 
     const HTML_ATTRS = [
       'src','srcset','alt','href',
-      'placeholder','rows','cols','type','value','name',
+      'placeholder','rows','cols','type','name',
       'width','height','loading','decoding','data-nimg',
       // semantic chat annotations injected by annotateChatMessages()
       'data-sender','data-gender','data-persona','data-client',
@@ -491,10 +492,40 @@ function serializeAccessibilityTree(rootSelector) {
       }
     });
 
+    // Live form values — many apps (this ExtJS panel included) set
+    // .value via JS after load without touching the DOM attribute or
+    // any child text node, so getAttribute('value') / textContent
+    // silently comes back empty even though the field is visibly filled.
+    if (tag === 'input') {
+      const type = (node.getAttribute('type') || 'text').toLowerCase();
+      if (type === 'checkbox' || type === 'radio') {
+        if (node.checked) attrParts.push('checked="checked"');
+      }
+      if (node.value !== '') {
+        attrParts.push(`value="${node.value.replace(/"/g, '&quot;')}"`);
+      }
+    } else if (tag === 'select') {
+      const opt = node.options[node.selectedIndex];
+      if (opt) {
+        const sel = (opt.value || opt.textContent).trim();
+        if (sel) attrParts.push(`data-selected-value="${sel.replace(/"/g, '&quot;')}"`);
+      }
+    } else if (tag === 'option') {
+      if (node.selected) attrParts.push('selected="selected"');
+      if (node.value !== '') attrParts.push(`value="${node.value.replace(/"/g, '&quot;')}"`);
+    }
+
     const attrsStr = attrParts.length ? ' ' + attrParts.join(' ') : '';
 
     if (VOID_TAGS.has(tag)) {
       return `${indent}<${tag}${attrsStr} />\n`;
+    }
+
+    // <textarea> content lives in the .value property — it is NOT
+    // reliably reflected as child text nodes once JS has set it.
+    if (tag === 'textarea') {
+      const val = node.value || '';
+      return `${indent}<${tag}${attrsStr}>${escText(val)}</${tag}>\n`;
     }
 
     const childNodes = Array.from(node.childNodes);
@@ -852,7 +883,7 @@ function injectPicker() {
     const VOID_TAGS = new Set(['area','base','br','col','embed','hr','img','input','link','meta','param','source','track','wbr']);
     const STYLE_PROPS = ['display','overflow','overflow-x','overflow-y','flex-direction','flex-wrap','flex','flex-grow','flex-shrink','justify-content','align-items','align-self','gap','position','top','right','bottom','left','z-index','width','height','min-width','max-width','min-height','max-height','padding','padding-top','padding-right','padding-bottom','padding-left','margin','margin-top','margin-right','margin-bottom','margin-left','border','border-top','border-right','border-bottom','border-left','border-radius','border-collapse','border-color','border-width','background-color','background-image','background-size','background-position','color','font-family','font-size','font-weight','font-style','line-height','letter-spacing','text-align','text-decoration','text-transform','white-space','word-break','vertical-align','cursor','opacity','box-sizing','user-select','resize','list-style','transform','aspect-ratio'];
     const SKIP_VALUES = new Set(['','auto','normal','none','initial','unset','inherit','static','inline','0px','0%','0','rgba(0, 0, 0, 0)','transparent','visible','start','left','top','separate','disc','outside']);
-    const HTML_ATTRS = ['id','class','href','src','srcset','alt','placeholder','rows','cols','type','value','name','width','height','loading','decoding','data-nimg','role','aria-label'];
+    const HTML_ATTRS = ['id','class','href','src','srcset','alt','placeholder','rows','cols','type','name','width','height','loading','decoding','data-nimg','role','aria-label'];
 
     function buildStyle(el) {
       const c = window.getComputedStyle(el), orig = el.getAttribute('style') || '';
@@ -871,8 +902,22 @@ function injectPicker() {
       const ap=[];
       const s=buildStyle(node); if(s)ap.push(`style="${esc(s)}"`);
       HTML_ATTRS.forEach(a=>{const v=node.getAttribute(a);if(v!==null&&v.trim())ap.push(`${a}="${esc(v.trim())}"`);});
+      // Live form values — JS-set .value on inputs/textareas/selects doesn't
+      // always touch the DOM attribute or child text, so read it directly.
+      if (tag==='input') {
+        const type=(node.getAttribute('type')||'text').toLowerCase();
+        if ((type==='checkbox'||type==='radio') && node.checked) ap.push('checked="checked"');
+        if (node.value!=='') ap.push(`value="${esc(node.value)}"`);
+      } else if (tag==='select') {
+        const opt=node.options[node.selectedIndex];
+        if (opt) { const sel=(opt.value||opt.textContent).trim(); if (sel) ap.push(`data-selected-value="${esc(sel)}"`); }
+      } else if (tag==='option') {
+        if (node.selected) ap.push('selected="selected"');
+        if (node.value!=='') ap.push(`value="${esc(node.value)}"`);
+      }
       const as=ap.length?' '+ap.join(' '):'';
       if(VOID_TAGS.has(tag))return `${ind}<${tag}${as} />\n`;
+      if(tag==='textarea')return `${ind}<${tag}${as}>${escT(node.value||'')}</${tag}>\n`;
       const kids=Array.from(node.childNodes);
       const textOnly=kids.every(c=>c.nodeType===3||(c.nodeType===1&&SKIP_TAGS.has(c.tagName.toLowerCase())));
       const txt=node.textContent.replace(/\s+/g,' ').trim();
@@ -1108,6 +1153,154 @@ function setLoading(label) { grabBtn.className = 'grab-btn loading'; grabBtn.tex
 function setStatus(msg, type = '') { status.textContent = msg; status.className = 'status' + (type ? ' '+type : ''); }
 function flashBtn(btn, label) { const orig = btn.textContent; btn.textContent = label; setTimeout(() => btn.textContent = orig, 1800); }
 function escHtml(str) { return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// ═══════════════════════════════════════════════════════════════════
+//  LIVE STATS TAB — reads the operator dashboard's own "statistics"
+//  API call (the same one triggered by clicking "Meine Statistiken")
+// ═══════════════════════════════════════════════════════════════════
+const STATS_HOSTS = [
+  'mods.diamondchat.net',
+  'mods.chatsx.net',
+  'mods.gold-chat.net',
+  'mods.platin-chat.com',
+  'mods.mltestapp.com',
+];
+
+const statsSiteInfo = document.getElementById('statsSiteInfo');
+const statsBtn      = document.getElementById('statsBtn');
+const statsStatus   = document.getElementById('statsStatus');
+const statsEmpty    = document.getElementById('statsEmpty');
+const statsGrid     = document.getElementById('statsGrid');
+const statsTime     = document.getElementById('statsTime');
+
+function initStatsTab() {
+  const host = currentTab?.url ? safeHostname(currentTab.url) : '';
+  statsSiteInfo.textContent = host || '—';
+  const ok = STATS_HOSTS.includes(host);
+  statsBtn.disabled = !ok;
+  statsStatus.textContent = ok ? '' : 'Open one of the 5 supported chat mod sites (and log in) first.';
+  statsStatus.className = 'status' + (ok ? '' : ' warn');
+}
+
+function safeHostname(url) {
+  try { return new URL(url).hostname; } catch (_) { return ''; }
+}
+
+statsBtn?.addEventListener('click', async () => {
+  statsStatus.textContent = '⏳ Reading Meine Statistiken API call…';
+  statsStatus.className = 'status warn';
+  statsBtn.disabled = true;
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: currentTab.id },
+      world: 'MAIN',
+      func: grabLiveStatsFromPage,
+    });
+    const stats = results[0]?.result;
+    if (!stats) {
+      statsStatus.textContent = '⚠ No stats response detected. Open the chat, click "Meine Statistiken" once yourself, then retry.';
+      statsStatus.className = 'status err';
+      return;
+    }
+    renderStats(stats);
+    statsStatus.textContent = '✓ Stats updated from live API call';
+    statsStatus.className = 'status ok';
+    statsTime.textContent = new Date().toLocaleTimeString();
+  } catch (e) {
+    statsStatus.textContent = 'Error: ' + e.message;
+    statsStatus.className = 'status err';
+  } finally {
+    statsBtn.disabled = false;
+  }
+});
+
+function renderStats(stats) {
+  const fields = [
+    { key: 'ins',            label: 'Ins',            hi: true },
+    { key: 'asaOuts',        label: 'ASA Outs',       hi: true },
+    { key: 'outs',           label: 'Outs' },
+    { key: 'openIns',        label: 'Open Ins' },
+    { key: 'openOuts',       label: 'Open Outs' },
+    { key: 'asaIns',         label: 'ASA Ins' },
+    { key: 'durationTimeOut',label: 'Timeout (s)' },
+  ];
+  statsGrid.innerHTML = fields
+    .filter(f => stats[f.key] !== undefined && stats[f.key] !== null)
+    .map(f => `<div class="stat-card ${f.hi ? 'hi' : ''}"><div class="stat-label">${escHtml(f.label)}</div><div class="stat-value">${escHtml(String(stats[f.key]))}</div></div>`)
+    .join('');
+  statsGrid.style.display = 'grid';
+  statsEmpty.style.display = 'none';
+}
+
+// Injected into the page's MAIN world. Temporarily hooks fetch + XHR to
+// catch the JSON response of the site's own "statistics" API call, and
+// (if the stats panel isn't already open) clicks the "Meine Statistiken"
+// button itself to trigger that call. Restores everything afterward.
+function grabLiveStatsFromPage() {
+  const REQUIRED_KEYS = ['ins', 'outs', 'asaOuts', 'asaIns', 'openIns', 'openOuts'];
+
+  function extractStats(json) {
+    if (!json || typeof json !== 'object') return null;
+    const src = json.data && typeof json.data === 'object' ? json.data : json;
+    let hits = 0;
+    for (const k of REQUIRED_KEYS) if (Object.prototype.hasOwnProperty.call(src, k)) hits++;
+    return hits >= 3 ? src : null;
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const origFetch = window.fetch;
+    const origOpen  = XMLHttpRequest.prototype.open;
+    const origSend  = XMLHttpRequest.prototype.send;
+
+    function finish(result) {
+      if (settled) return;
+      settled = true;
+      window.fetch = origFetch;
+      XMLHttpRequest.prototype.open = origOpen;
+      XMLHttpRequest.prototype.send = origSend;
+      resolve(result);
+    }
+
+    window.fetch = async function (...args) {
+      const res = await origFetch.apply(this, args);
+      try {
+        res.clone().json().then((json) => {
+          const stats = extractStats(json);
+          if (stats) finish(stats);
+        }).catch(() => {});
+      } catch (_) {}
+      return res;
+    };
+
+    XMLHttpRequest.prototype.open = function (...args) {
+      return origOpen.apply(this, args);
+    };
+    XMLHttpRequest.prototype.send = function (...args) {
+      this.addEventListener('load', function () {
+        try {
+          const json = JSON.parse(this.responseText);
+          const stats = extractStats(json);
+          if (stats) finish(stats);
+        } catch (_) {}
+      });
+      return origSend.apply(this, args);
+    };
+
+    // Try to fire the request ourselves by clicking the site's own
+    // "Meine Statistiken" button, so the user doesn't have to.
+    try {
+      const candidates = Array.from(document.querySelectorAll('button, a, div, span'));
+      const btn = candidates.find((el) => {
+        const t = (el.textContent || '').trim();
+        return /Statistik|Statistics/i.test(t) && t.length < 40 && el.children.length <= 2;
+      });
+      if (btn) btn.click();
+    } catch (_) {}
+
+    setTimeout(() => finish(null), 6000);
+  });
+}
 
 // ── Boot ──────────────────────────────────────────────────────────
 init();

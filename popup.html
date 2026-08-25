@@ -104,6 +104,7 @@
     .grab-btn.success{background:var(--green-dim);color:var(--green);border:1px solid var(--green);}
     .grab-btn.error{background:var(--red-dim);color:var(--red);border:1px solid var(--red);}
     .grab-btn.waiting{background:var(--yellow-dim);color:var(--yellow);border:1px solid var(--yellow);cursor:not-allowed;}
+    .grab-btn:disabled{background:var(--bg2);color:var(--faint);border:1px solid var(--border);cursor:not-allowed;box-shadow:none;transform:none;}
 
     /* ── also-copy row ── */
     .also-row{display:flex;gap:6px;margin-top:7px;}
@@ -122,6 +123,15 @@
     .status.warn{color:var(--yellow);}
 
     hr{border:none;border-top:1px solid var(--border);margin:11px 0;}
+
+    /* ── stats grid ── */
+    .stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px;}
+    .stat-card{background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:9px 10px;}
+    .stat-card.hi{border-color:var(--green);background:var(--green-dim);}
+    .stat-label{font-family:var(--mono);font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;}
+    .stat-card.hi .stat-label{color:var(--green);}
+    .stat-value{font-family:var(--mono);font-size:18px;font-weight:700;color:var(--text);}
+    .stat-card.hi .stat-value{color:var(--green);}
     .stats{display:flex;justify-content:space-between;font-size:9px;font-family:var(--mono);color:var(--faint);}
     .stats span{color:var(--muted);}
 
@@ -219,7 +229,7 @@
     <div class="brand">
       <div class="dot"></div>
       <span class="brand-name">HTML Grabber</span>
-      <span class="brand-ver">v3.0</span>
+      <span class="brand-ver">v3.2</span>
     </div>
     <div class="shortcuts-hint">
       Ctrl+Shift+G — full page<br>
@@ -230,6 +240,7 @@
   <!-- Tab bar -->
   <div class="tabs">
     <div class="tab active" data-tab="grab">⚡ Grab</div>
+    <div class="tab" data-tab="stats">📊 Stats</div>
     <div class="tab" data-tab="history">🕘 History</div>
     <div class="tab" data-tab="diff">⚖️ Diff</div>
     <div class="tab" data-tab="settings">⚙️ Settings</div>
@@ -271,6 +282,19 @@
     <div class="stats">
       <div>Last grab</div>
       <span id="lastSize">—</span>
+    </div>
+  </div>
+
+  <!-- ── STATS TAB ── -->
+  <div class="panel" id="tab-stats">
+    <div class="page-info" id="statsSiteInfo">—</div>
+    <button class="grab-btn" id="statsBtn">📊 Fetch Live Stats</button>
+    <div class="status" id="statsStatus"></div>
+    <div id="statsEmpty" class="history-empty">Click "Fetch Live Stats" while<br>logged in and inside the chat.</div>
+    <div id="statsGrid" class="stats-grid" style="display:none;"></div>
+    <div class="stats" style="margin-top:10px;">
+      <div>Last fetched</div>
+      <span id="statsTime">—</span>
     </div>
   </div>
 

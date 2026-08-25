@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "HTML Grabber Pro",
-  "version": "3.0",
-  "description": "Grab HTML, pick elements, auto-detect chat layout, save history, diff grabs, keyboard shortcuts.",
+  "version": "3.2",
+  "description": "Grab HTML, pick elements, auto-detect chat layout, save history, diff grabs, keyboard shortcuts, live operator stats.",
   "permissions": ["activeTab", "scripting", "clipboardWrite", "storage", "commands"],
   "host_permissions": ["<all_urls>"],
   "action": {
